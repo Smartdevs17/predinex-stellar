@@ -1,16 +1,13 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    Address, Env,
-};
+use soroban_sdk::{testutils::Address as _, Address, Env};
 
 #[test]
 fn test_create_pool() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, PredinexContract);
+    let contract_id = env.register(None, PredinexContract);
     let client = PredinexContractClient::new(&env, &contract_id);
 
     let creator = Address::generate(&env);
@@ -40,11 +37,11 @@ fn test_place_bet() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, PredinexContract);
+    let contract_id = env.register(None, PredinexContract);
     let client = PredinexContractClient::new(&env, &contract_id);
 
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract(token_admin.clone());
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token = token::Client::new(&env, &token_id);
     let token_admin_client = token::StellarAssetClient::new(&env, &token_id);
 
@@ -83,11 +80,11 @@ fn test_settle_and_claim() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register_contract(None, PredinexContract);
+    let contract_id = env.register(None, PredinexContract);
     let client = PredinexContractClient::new(&env, &contract_id);
 
     let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract(token_admin.clone());
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token = token::Client::new(&env, &token_id);
     let token_admin_client = token::StellarAssetClient::new(&env, &token_id);
 
