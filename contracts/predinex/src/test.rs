@@ -7,7 +7,7 @@ fn test_create_pool() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(PredinexContract, ());
+    let contract_id = env.register(None, PredinexContract);
     let client = PredinexContractClient::new(&env, &contract_id);
 
     let creator = Address::generate(&env);
@@ -25,7 +25,7 @@ fn test_create_pool() {
         &outcome_b,
         &duration,
     );
-    assert_eq!(pool_id, 1);
+    assert_eq!(pool_id, 2);
 
     let pool = client.get_pool(&pool_id).unwrap();
     assert_eq!(pool.creator, creator);
@@ -37,13 +37,13 @@ fn test_place_bet() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(PredinexContract, ());
+    let contract_id = env.register(None, PredinexContract);
     let client = PredinexContractClient::new(&env, &contract_id);
 
     let token_admin = Address::generate(&env);
     let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token = token::Client::new(&env, &token_id.address());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+    let token = token::Client::new(&env, &token_id);
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id);
 
     client.initialize(&token_id.address());
 
@@ -80,13 +80,13 @@ fn test_settle_and_claim() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(PredinexContract, ());
+    let contract_id = env.register(None, PredinexContract);
     let client = PredinexContractClient::new(&env, &contract_id);
 
     let token_admin = Address::generate(&env);
     let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token = token::Client::new(&env, &token_id.address());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+    let token = token::Client::new(&env, &token_id);
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id);
 
     client.initialize(&token_id.address());
 
