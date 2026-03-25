@@ -2,17 +2,24 @@
 
 import Navbar from "../../components/Navbar";
 import BettingSection from "../../components/BettingSection";
+import ClaimWinningsButton from "../../components/ClaimWinningsButton";
+import { useStacks } from "../../components/StacksProvider";
 import { useEffect, useState } from "react";
-import { getPool, Pool } from "../../lib/stacks-api";
+import { getPool, Pool, getUserBets } from "../../lib/stacks-api";
 import { TrendingUp, Users, Clock } from "lucide-react";
 import { use } from "react";
+import ShareButton from "../../../components/ShareButton";
 
 export default function PoolDetails({ params }: { params: Promise<{ id: string }> }) {
     const { id } = use(params);
     const poolId = parseInt(id);
 
+    const { userData } = useStacks();
+    const stxAddress = userData?.profile?.stxAddress?.mainnet || userData?.profile?.stxAddress?.testnet || userData?.identityAddress;
+
     const [pool, setPool] = useState<Pool | null>(null);
     const [isLoading, setIsLoading] = useState(true);
+    const [userBet, setUserBet] = useState<{amountA: number; amountB: number} | null>(null);
 
     useEffect(() => {
         getPool(poolId).then(data => {
@@ -20,6 +27,18 @@ export default function PoolDetails({ params }: { params: Promise<{ id: string }
             setIsLoading(false);
         });
     }, [poolId]);
+
+    useEffect(() => {
+        if (stxAddress && poolId) {
+            getUserBet(poolId, stxAddress).then(bet => {
+                setUserBet(bet);
+            }).catch(() => setUserBet(null));
+        }
+    }, [stxAddress, poolId]);
+
+    const userHasWinnings = pool?.settled && userBet && 
+        ((pool.winningOutcome === 0 && userBet.amountA > 0) || 
+         (pool.winningOutcome === 1 && userBet.amountB > 0));
 
 
 
@@ -54,9 +73,15 @@ export default function PoolDetails({ params }: { params: Promise<{ id: string }
                     {/* Header */}
                     <div className="flex justify-between items-start mb-6">
                         <span className="text-xs font-mono text-muted-foreground">#POOL-{pool.id}</span>
-                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${pool.settled ? 'bg-zinc-800 text-zinc-400' : 'bg-green-500/10 text-green-500'}`}>
-                            {pool.settled ? 'Settled' : 'Active'}
-                        </span>
+                        <div className="flex items-center gap-3">
+                            <ShareButton
+                                title={pool.title}
+                                text={`Check out this prediction market: ${pool.title}`}
+                            />
+                            <span className={`px-3 py-1 rounded-full text-xs font-medium ${pool.settled ? 'bg-zinc-800 text-zinc-400' : 'bg-green-500/10 text-green-500'}`}>
+                                {pool.settled ? 'Settled' : 'Active'}
+                            </span>
+                        </div>
                     </div>
 
                     <h1 className="text-3xl font-bold mb-3">{pool.title}</h1>
@@ -101,7 +126,17 @@ export default function PoolDetails({ params }: { params: Promise<{ id: string }
                     </div>
 
                     {/* Betting UI */}
-                    <BettingSection pool={pool} poolId={poolId} />
+                    {pool.settled ? (
+                        <div className="mt-6">
+                            <ClaimWinningsButton 
+                                poolId={poolId} 
+                                isSettled={pool.settled} 
+                                userHasWinnings={userHasWinnings} 
+                            />
+                        </div>
+                    ) : (
+                        <BettingSection pool={pool} poolId={poolId} />
+                    )}
                 </div>
             </div>
         </main>

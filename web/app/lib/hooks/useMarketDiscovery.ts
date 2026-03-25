@@ -1,9 +1,8 @@
 'use client';
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
-import { PoolData, ProcessedMarket, MarketFilters, PaginationState } from '../market-types';
-import { fetchAllPools } from '../enhanced-stacks-api';
-import { processMarketData, getCurrentBlockHeight } from '../market-utils';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { ProcessedMarket, MarketFilters, PaginationState } from '../market-types';
+import { readBlockHeightWarning, readMarketListCache, warmMarketListCache } from '../market-list-cache';
 
 interface UseMarketDiscoveryState {
   // Data
@@ -15,6 +14,9 @@ interface UseMarketDiscoveryState {
   isLoading: boolean;
   error: string | null;
   
+  // Non-blocking data freshness warnings
+  blockHeightWarning: string | null;
+
   // Filters and pagination
   filters: MarketFilters;
   pagination: PaginationState;
@@ -30,9 +32,18 @@ interface UseMarketDiscoveryState {
 const ITEMS_PER_PAGE = 12;
 
 export function useMarketDiscovery(): UseMarketDiscoveryState {
+  // Instant first paint from cached market list.
+  const [cacheSnapshot] = useState(() => readMarketListCache());
+  const hasFreshInitialCacheRef = useRef(cacheSnapshot.isFresh);
+  const hasAnyMarketsRef = useRef(cacheSnapshot.markets.length > 0);
+
+  const [blockHeightWarning, setBlockHeightWarning] = useState<string | null>(() =>
+    readBlockHeightWarning()
+  );
+
   // Core data state
-  const [allMarkets, setAllMarkets] = useState<ProcessedMarket[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [allMarkets, setAllMarkets] = useState<ProcessedMarket[]>(cacheSnapshot.markets);
+  const [isLoading, setIsLoading] = useState<boolean>(() => !cacheSnapshot.isFresh);
   const [error, setError] = useState<string | null>(null);
   
   // Filter state
@@ -46,24 +57,31 @@ export function useMarketDiscovery(): UseMarketDiscoveryState {
   const [currentPage, setCurrentPage] = useState(1);
 
   // Fetch markets data
-  const fetchMarkets = useCallback(async () => {
+  const fetchMarkets = useCallback(async (options?: { forceLoading?: boolean }) => {
+    const shouldShowLoading =
+      options?.forceLoading || !hasFreshInitialCacheRef.current;
+
     try {
-      setIsLoading(true);
+      if (shouldShowLoading) setIsLoading(true);
       setError(null);
       
-      const poolsData = await fetchAllPools();
-      const currentBlockHeight = getCurrentBlockHeight();
-      
-      const processedMarkets = poolsData.map(pool => 
-        processMarketData(pool, currentBlockHeight)
-      );
+      const processedMarkets = await warmMarketListCache();
       
       setAllMarkets(processedMarkets);
+      hasAnyMarketsRef.current = processedMarkets.length > 0;
+      setBlockHeightWarning(readBlockHeightWarning());
     } catch (err) {
       console.error('Failed to fetch markets:', err);
-      setError('Failed to load markets. Please try again.');
+
+      // Preserve cached markets (if any) on background refresh failures.
+      if (hasAnyMarketsRef.current) {
+        setError(null);
+      } else {
+        setError('Failed to load markets. Please try again.');
+      }
     } finally {
       setIsLoading(false);
+      hasFreshInitialCacheRef.current = true;
     }
   }, []);
 
@@ -164,7 +182,7 @@ export function useMarketDiscovery(): UseMarketDiscoveryState {
   }, [pagination.totalPages]);
 
   const retry = useCallback(() => {
-    fetchMarkets();
+    fetchMarkets({ forceLoading: true });
   }, [fetchMarkets]);
 
   return {
@@ -176,6 +194,7 @@ export function useMarketDiscovery(): UseMarketDiscoveryState {
     // Loading states
     isLoading,
     error,
+    blockHeightWarning,
     
     // Filters and pagination
     filters,

@@ -109,10 +109,36 @@ Predinex Stellar follows a phased approach to bring a premium betting experience
 - 🔄 Freighter wallet support.
 - ⏳ Real-time market tracking on Stellar.
 
-### Phase 3: Ecosystem & Security (Q3 2026)
-- 📅 Multi-token liquidity pools.
-- 📅 Decentralized Oracle integration.
-- 📅 Governance dashboard for platform parameters.
+## 🤝 Contributing & Releases
+
+We welcome contributions! Please see our development guides for more information:
+- [Frontend Development](./web/DEVELOPMENT.md)
+- [Release Process](./RELEASE.md)
+
+## 🛠️ CI/CD Pipeline
+
+The project uses GitHub Actions to ensure code quality and prevent regressions. The workflow runs on every push and pull request to `main`.
+
+### Local Verification
+
+You can run the same checks locally to verify your changes before pushing:
+
+**Web App:**
+```bash
+cd web
+npm run lint
+npm run test
+npm run build
+```
+
+**Smart Contracts:**
+```bash
+cd contracts/predinex
+cargo fmt
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+```
 
 ---
 
