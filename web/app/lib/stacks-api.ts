@@ -314,19 +314,12 @@ export async function getUserActivity(
             if (tx.tx_status === 'success') status = 'success';
             else if (tx.tx_status === 'abort_by_response' || tx.tx_status === 'abort_by_post_condition') status = 'failed';
 
-            // Extract amount from function args if available
-            let amount: number | undefined;
-            let poolId: number | undefined;
-            const args: any[] = callInfo?.function_args || [];
+            // Parse contract events for richer data
+            const event = parseContractEvents(tx);
 
-            for (const arg of args) {
-                if (arg.name === 'amount' && arg.repr) {
-                    amount = Number(arg.repr.replace('u', ''));
-                }
-                if (arg.name === 'pool-id' && arg.repr) {
-                    poolId = Number(arg.repr.replace('u', ''));
-                }
-            }
+            // Extract amount from function args if available
+            const args: any[] = callInfo?.function_args || [];
+            const { amount, poolId } = extractPoolInfo(args);
 
             return {
                 txId: tx.tx_id,
