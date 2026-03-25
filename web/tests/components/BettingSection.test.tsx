@@ -14,6 +14,12 @@ vi.mock('@stacks/connect', () => ({
   openContractCall: vi.fn(),
 }));
 
+const mockShowToast = vi.fn();
+
+vi.mock('../../providers/ToastProvider', () => ({
+  useToast: () => ({ showToast: mockShowToast }),
+}));
+
 const mockPool = {
   id: 0,
   title: 'Test Pool',
@@ -31,8 +37,6 @@ const mockPool = {
 describe('BettingSection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Mock window.alert
-    window.alert = vi.fn();
   });
 
   it('renders betting section with pool information', () => {
@@ -63,7 +67,7 @@ describe('BettingSection', () => {
     expect(screen.getByText('Connect Wallet')).toBeInTheDocument();
   });
 
-  it('validates bet amount before placing bet', async () => {
+  it('shows error toast for empty bet amount', async () => {
     vi.mocked(StacksProvider.useStacks).mockReturnValue({
       userData: { profile: { stxAddress: { mainnet: 'ST123' } } },
       authenticate: vi.fn(),
@@ -77,13 +81,14 @@ describe('BettingSection', () => {
     const betButton = screen.getByText(/Bet on Outcome A/i);
     await user.click(betButton);
 
-    expect(window.alert).toHaveBeenCalledWith(
-      'Please enter a valid bet amount greater than 0.'
+    expect(mockShowToast).toHaveBeenCalledWith(
+      'Please enter a valid bet amount greater than 0.',
+      'error'
     );
     expect(vi.mocked(StacksConnect.openContractCall)).not.toHaveBeenCalled();
   });
 
-  it('validates minimum bet amount', async () => {
+  it('shows error toast for bet below minimum amount', async () => {
     vi.mocked(StacksProvider.useStacks).mockReturnValue({
       userData: { profile: { stxAddress: { mainnet: 'ST123' } } },
       authenticate: vi.fn(),
@@ -99,7 +104,10 @@ describe('BettingSection', () => {
     const betButton = screen.getByText(/Bet on Outcome A/i);
     await user.click(betButton);
 
-    expect(window.alert).toHaveBeenCalledWith('Minimum bet amount is 0.1 STX.');
+    expect(mockShowToast).toHaveBeenCalledWith(
+      'Minimum bet amount is 0.1 STX.',
+      'error'
+    );
     expect(vi.mocked(StacksConnect.openContractCall)).not.toHaveBeenCalled();
   });
 
@@ -164,5 +172,3 @@ describe('BettingSection', () => {
     });
   });
 });
-
-
