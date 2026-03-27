@@ -9,6 +9,10 @@ import { uintCV } from '@stacks/transactions';
 import { getRuntimeConfig } from '../lib/runtime-config';
 import { Loader2, Wallet, AlertCircle } from 'lucide-react';
 import { Pool } from '@/app/lib/stacks-api';
+import {
+    classifyConnectivityIssue,
+    getConnectivityMessage,
+} from '../lib/network-errors';
 
 interface BettingSectionProps {
     pool: Pool;
@@ -52,6 +56,12 @@ export default function BettingSection({ pool, poolId, onBetSuccess }: BettingSe
 
         setIsBetting(true);
         const amountInMicroStx = Math.floor(parseFloat(betAmount) * 1_000_000);
+        const slowNetworkTimer = window.setTimeout(() => {
+            showToast(
+                'Network is slow. Waiting for wallet confirmation... You can keep this tab open.',
+                'info'
+            );
+        }, 10000);
 
         try {
             await openContractCall({
@@ -64,6 +74,7 @@ export default function BettingSection({ pool, poolId, onBetSuccess }: BettingSe
                     uintCV(amountInMicroStx),
                 ],
                 onFinish: (data) => {
+                    window.clearTimeout(slowNetworkTimer);
                     console.log('Bet placed successfully:', data);
                     showToast(`Bet placed successfully!`, "success");
                     setIsBetting(false);
@@ -73,14 +84,17 @@ export default function BettingSection({ pool, poolId, onBetSuccess }: BettingSe
                     }
                 },
                 onCancel: () => {
+                    window.clearTimeout(slowNetworkTimer);
                     console.log('User cancelled bet transaction');
                     showToast("Transaction cancelled", "info");
                     setIsBetting(false);
                 },
             });
         } catch (error) {
+            window.clearTimeout(slowNetworkTimer);
             console.error("Bet transaction failed:", error);
-            showToast(`Bet failed: ${error instanceof Error ? error.message : 'Unknown error occurred'}`, "error");
+            const issue = classifyConnectivityIssue(error);
+            showToast(getConnectivityMessage(issue, 'Placing your bet'), "error");
             setIsBetting(false);
         }
     };
