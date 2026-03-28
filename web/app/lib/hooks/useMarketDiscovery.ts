@@ -3,6 +3,11 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { ProcessedMarket, MarketFilters, PaginationState } from '../market-types';
 import { readBlockHeightWarning, readMarketListCache, warmMarketListCache } from '../market-list-cache';
+import {
+  classifyConnectivityIssue,
+  getConnectivityMessage,
+  withTimeout,
+} from '../network-errors';
 
 interface UseMarketDiscoveryState {
   // Data
@@ -65,19 +70,26 @@ export function useMarketDiscovery(): UseMarketDiscoveryState {
       if (shouldShowLoading) setIsLoading(true);
       setError(null);
       
-      const processedMarkets = await warmMarketListCache();
+      const processedMarkets = await withTimeout(
+        warmMarketListCache(),
+        12000,
+        'Market loading timeout'
+      );
       
       setAllMarkets(processedMarkets);
       hasAnyMarketsRef.current = processedMarkets.length > 0;
       setBlockHeightWarning(readBlockHeightWarning());
     } catch (err) {
       console.error('Failed to fetch markets:', err);
+      const issue = classifyConnectivityIssue(err);
+      const message = getConnectivityMessage(issue, 'Loading markets');
 
       // Preserve cached markets (if any) on background refresh failures.
       if (hasAnyMarketsRef.current) {
         setError(null);
+        setBlockHeightWarning(message);
       } else {
-        setError('Failed to load markets. Please try again.');
+        setError(message);
       }
     } finally {
       setIsLoading(false);

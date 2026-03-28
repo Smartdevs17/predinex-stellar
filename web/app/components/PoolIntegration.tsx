@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useStacks } from './StacksProvider';
+import { useWallet } from './WalletAdapterProvider';
 import { useWalletConnect } from '../lib/hooks/useWalletConnect';
 import { openContractCall } from '@stacks/connect';
 import { uintCV, stringAsciiCV } from '@stacks/transactions';
@@ -32,7 +32,7 @@ interface PoolStats {
 }
 
 export default function PoolIntegration() {
-  const { userData } = useStacks();
+  const { isConnected } = useWallet();
   const { session } = useWalletConnect();
   const { isConnected } = useAppKitAccount();
   const { isMismatch, expectedNetworkName, switchNetwork } = useNetworkMismatch();

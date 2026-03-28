@@ -1,8 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useStacks } from './StacksProvider';
-import { useWalletConnection } from '../../lib/hooks/useWalletConnection';
+import { useState } from 'react';
 import { useToast } from '../../providers/ToastProvider';
 import { openContractCall } from '@stacks/connect';
 import { uintCV } from '@stacks/transactions';
@@ -10,13 +8,20 @@ import { getRuntimeConfig } from '../lib/runtime-config';
 import { Loader2, Wallet, AlertCircle } from 'lucide-react';
 import { Pool } from '@/app/lib/stacks-api';
 import { useNetworkMismatch } from '@/lib/hooks/useNetworkMismatch';
+import { useWallet } from './WalletAdapterProvider';
+import {
+    classifyConnectivityIssue,
+    getConnectivityMessage,
+} from '../lib/network-errors';
 
 interface BettingSectionProps {
     pool: Pool;
     poolId: number;
+    onBetSuccess?: (outcome: number, amount: number) => void;
 }
 
-export default function BettingSection({ pool, poolId }: BettingSectionProps) {
+export default function BettingSection({ pool, poolId, onBetSuccess }: BettingSectionProps) {
+    const { isConnected, address, connect } = useWallet();
     const { userData, authenticate } = useStacks();
     const { isConnected, address } = useWalletConnection();
     const { isMismatch, expectedNetworkName, switchNetwork } = useNetworkMismatch();
@@ -24,22 +29,13 @@ export default function BettingSection({ pool, poolId }: BettingSectionProps) {
     const { contract } = getRuntimeConfig();
     const [betAmount, setBetAmount] = useState("");
     const [isBetting, setIsBetting] = useState(false);
-    const [walletBalance, setWalletBalance] = useState<number | null>(null);
 
-    // Fetch wallet balance when connection changes
-    useEffect(() => {
-        if (isConnected) {
-            // In a real app, fetch balance from API
-            const timer = setTimeout(() => setWalletBalance(100.0), 0); // Mock balance for testing
-            return () => clearTimeout(timer);
-        } else {
-            setWalletBalance(null);
-        }
-    }, [isConnected]);
+    // Derived directly from connection state — no effect needed for this mock value
+    const walletBalance: number | null = isConnected ? 100.0 : null;
 
     const placeBet = async (outcome: number) => {
-        if (!userData) {
-            authenticate();
+        if (!isConnected) {
+            connect();
             return;
         }
 
@@ -62,6 +58,12 @@ export default function BettingSection({ pool, poolId }: BettingSectionProps) {
 
         setIsBetting(true);
         const amountInMicroStx = Math.floor(parseFloat(betAmount) * 1_000_000);
+        const slowNetworkTimer = window.setTimeout(() => {
+            showToast(
+                'Network is slow. Waiting for wallet confirmation... You can keep this tab open.',
+                'info'
+            );
+        }, 10000);
 
         try {
             await openContractCall({
@@ -74,20 +76,27 @@ export default function BettingSection({ pool, poolId }: BettingSectionProps) {
                     uintCV(amountInMicroStx),
                 ],
                 onFinish: (data) => {
+                    window.clearTimeout(slowNetworkTimer);
                     console.log('Bet placed successfully:', data);
                     showToast(`Bet placed successfully!`, "success");
                     setIsBetting(false);
                     setBetAmount("");
+                    if (onBetSuccess) {
+                        onBetSuccess(outcome, amountInMicroStx);
+                    }
                 },
                 onCancel: () => {
+                    window.clearTimeout(slowNetworkTimer);
                     console.log('User cancelled bet transaction');
                     showToast("Transaction cancelled", "info");
                     setIsBetting(false);
                 },
             });
         } catch (error) {
+            window.clearTimeout(slowNetworkTimer);
             console.error("Bet transaction failed:", error);
-            showToast(`Bet failed: ${error instanceof Error ? error.message : 'Unknown error occurred'}`, "error");
+            const issue = classifyConnectivityIssue(error);
+            showToast(getConnectivityMessage(issue, 'Placing your bet'), "error");
             setIsBetting(false);
         }
     };
@@ -101,14 +110,14 @@ export default function BettingSection({ pool, poolId }: BettingSectionProps) {
         );
     }
 
-    if (!userData && !isConnected) {
+    if (!isConnected) {
         return (
             <div className="text-center py-6 bg-muted/50 rounded-lg">
                 <Wallet className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
                 <p className="text-lg font-bold mb-2">Connect Wallet to Bet</p>
                 <p className="text-muted-foreground mb-4">You need to connect your wallet to place bets on this market.</p>
                 <button
-                    onClick={authenticate}
+                    onClick={connect}
                     className="flex items-center gap-2 bg-primary/10 hover:bg-primary/20 text-primary px-6 py-3 rounded-full border border-primary/20 transition font-medium mx-auto hover:scale-105"
                 >
                     <Wallet className="w-5 h-5" />
