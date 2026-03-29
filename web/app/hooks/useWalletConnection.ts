@@ -1,10 +1,11 @@
 /**
- * useWalletConnection - Custom hook for wallet connection status
- * Provides wallet availability and connection state
+ * useWalletConnection - Production hook for wallet connection status
+ * Provides real wallet availability and connection state from Stacks context
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { isWalletAvailable, WalletType } from '../lib/wallet-connector';
+import { useStacks } from '../components/StacksProvider';
 
 export interface WalletConnectionStatus {
     leather: boolean;
@@ -34,3 +35,19 @@ export function useWalletConnection(): WalletConnectionStatus {
     return status;
 }
 
+export function useWalletState(): WalletConnectionState {
+    const { userData, authenticate, signOut } = useStacks();
+    
+    const isConnected = !!userData;
+    const address = userData?.profile?.stxAddress?.mainnet || null;
+    
+    const connect = useCallback(() => {
+        authenticate();
+    }, [authenticate]);
+    
+    const disconnect = useCallback(() => {
+        signOut();
+    }, [signOut]);
+    
+    return { isConnected, address, connect, disconnect };
+}

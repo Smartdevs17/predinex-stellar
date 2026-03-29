@@ -41,7 +41,6 @@ const disconnectedWallet = {
 describe('Navbar and Auth Integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    cleanup();
   });
 
   it('shows authentication required when not connected', () => {
