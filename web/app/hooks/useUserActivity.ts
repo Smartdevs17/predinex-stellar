@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { predinexReadApi } from '../lib/adapters/predinex-read-api';
 import type { ActivityItem } from '../lib/adapters/types';
+import { userActivityCache } from '../lib/cache-invalidation';
 
 interface UseUserActivityReturn {
     activities: ActivityItem[];
@@ -15,6 +16,8 @@ interface UseUserActivityReturn {
  * Hook to fetch and manage a user's on-chain activity feed.
  * Uses the Soroban event service to ingest contract events from Stellar.
  * Automatically fetches when an address is provided.
+ * Uses the shared userActivityCache so mutation-driven invalidation
+ * (via invalidateOnPlaceBet / invalidateOnClaimWinnings) forces a fresh fetch.
  */
 export function useUserActivity(
     address: string | undefined,
@@ -27,6 +30,13 @@ export function useUserActivity(
     const fetchActivity = useCallback(async () => {
         if (!address) {
             setActivities([]);
+            return;
+        }
+
+        // Return in-memory cached result if still fresh
+        const cached = userActivityCache.get<ActivityItem[]>(address);
+        if (cached) {
+            setActivities(cached);
             return;
         }
 
