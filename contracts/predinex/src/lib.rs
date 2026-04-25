@@ -58,6 +58,40 @@ impl PredinexContract {
         env.storage().persistent().set(&DataKey::Treasury, &0i128);
     }
 
+    /// Normalize a Soroban `String` to a comparable form by converting to
+    /// lowercase bytes and stripping leading/trailing ASCII spaces.
+    /// Uses a fixed 64-byte stack buffer — outcome labels longer than 64 bytes
+    /// are compared on their first 64 bytes only, which is sufficient for
+    /// practical market labels.
+    fn normalize_outcome(env: &Env, s: &String) -> soroban_sdk::Bytes {
+        let len = s.len() as usize;
+        // Copy raw bytes into a fixed-size stack buffer (max 64 bytes)
+        let copy_len = if len < 64 { len } else { 64 };
+        let mut buf = [0u8; 64];
+        s.copy_into_slice(&mut buf[..copy_len]);
+
+        // Find trim boundaries
+        let mut start = 0usize;
+        let mut end = copy_len;
+        while start < end && buf[start] == b' ' {
+            start += 1;
+        }
+        while end > start && buf[end - 1] == b' ' {
+            end -= 1;
+        }
+
+        // Build a Soroban Bytes with lowercased content
+        let mut result = soroban_sdk::Bytes::new(env);
+        let mut i = start;
+        while i < end {
+            let b = buf[i];
+            let lower = if b >= b'A' && b <= b'Z' { b + 32 } else { b };
+            result.push_back(lower);
+            i += 1;
+        }
+        result
+    }
+
     pub fn create_pool(
         env: Env,
         creator: Address,
@@ -68,6 +102,11 @@ impl PredinexContract {
         duration: u64,
     ) -> u32 {
         creator.require_auth();
+
+        // Reject duplicate outcome labels (case-insensitive, whitespace-trimmed)
+        if Self::normalize_outcome(&env, &outcome_a) == Self::normalize_outcome(&env, &outcome_b) {
+            panic!("Duplicate outcome labels");
+        }
 
         let pool_id = Self::get_pool_counter(&env);
 
