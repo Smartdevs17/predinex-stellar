@@ -1,6 +1,6 @@
 #![cfg(test)]
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
 
 fn setup_contract() -> (Env, PredinexContractClient<'static>, Address, Address) {
     let env = Env::default();
@@ -11,7 +11,6 @@ fn setup_contract() -> (Env, PredinexContractClient<'static>, Address, Address) 
 
     let token_admin = Address::generate(&env);
     let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
 
     client.initialize(&token_id.address(), &token_admin);
 
@@ -23,14 +22,14 @@ fn setup_contract() -> (Env, PredinexContractClient<'static>, Address, Address) 
 
 #[test]
 fn test_get_protocol_fee_returns_default() {
-    let (env, client, _, _) = setup_contract();
+    let (_env, client, _, _) = setup_contract();
     let fee = client.get_protocol_fee();
     assert_eq!(fee, 200, "default fee should be 200 basis points (2%)");
 }
 
 #[test]
 fn test_set_protocol_fee_within_bounds() {
-    let (env, client, admin, _) = setup_contract();
+    let (_env, client, admin, _) = setup_contract();
     client.set_protocol_fee(&admin, &500);
     assert_eq!(client.get_protocol_fee(), 500);
 }
@@ -38,13 +37,13 @@ fn test_set_protocol_fee_within_bounds() {
 #[test]
 #[should_panic(expected = "Fee out of bounds")]
 fn test_set_protocol_fee_above_max_rejected() {
-    let (env, client, admin, _) = setup_contract();
+    let (_env, client, admin, _) = setup_contract();
     client.set_protocol_fee(&admin, &1001);
 }
 
 #[test]
 fn test_set_protocol_fee_at_boundaries() {
-    let (env, client, admin, _) = setup_contract();
+    let (_env, client, admin, _) = setup_contract();
     client.set_protocol_fee(&admin, &0);
     assert_eq!(client.get_protocol_fee(), 0);
     client.set_protocol_fee(&admin, &1000);
@@ -82,15 +81,15 @@ fn test_claim_winnings_uses_configured_fee() {
 
 #[test]
 fn test_create_pool_event_includes_metadata() {
-    let (env, client, admin, _) = setup_contract();
-    let creator = Address::generate(&env);
+    let (_env, client, _admin, _) = setup_contract();
+    let creator = Address::generate(&_env);
 
     let pool_id = client.create_pool(
         &creator,
-        &String::from_str(&env, "Test Market"),
-        &String::from_str(&env, "Description"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
+        &String::from_str(&_env, "Test Market"),
+        &String::from_str(&_env, "Description"),
+        &String::from_str(&_env, "Yes"),
+        &String::from_str(&_env, "No"),
         &3600,
     );
 
