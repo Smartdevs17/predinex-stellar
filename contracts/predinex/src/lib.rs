@@ -14,15 +14,21 @@ pub enum DataKey {
     TreasuryRecipient,
     DelegatedSettler(u32),
     FreezeAdmin,
+    /// #179 — per-pool creation fee in stroops. Set by the admin via
+    /// `set_creation_fee`; defaults to 0 (no fee) when absent.
+    CreationFee,
 }
 
 /// Explicit lifecycle status for a prediction pool.
 ///
 /// Transitions:
 ///   Open  ──(expiry reached + settle_pool called)──►  Settled(winning_outcome)
-///   Open  ──(void_pool called by creator)──────────►  Voided
+///   Open  ──(freeze_pool called)──►  Frozen
+///   Settled  ──(dispute_pool called)──►  Disputed
+///   Frozen/Disputed  ──(unfreeze_pool called)──►  Active
 ///
-/// Terminal states are mutually exclusive; status is the single source of truth.
+/// Future terminal states (Cancelled, Voided, Paused) can be added here
+/// without ambiguity, because status is the single source of truth.
 #[derive(Clone, PartialEq, Debug)]
 #[contracttype]
 pub enum PoolStatus {
@@ -32,11 +38,11 @@ pub enum PoolStatus {
     Active,
     /// Betting closed and a winning outcome has been declared.
     Settled(u32),
-    /// Pool was declared unresolvable; users may claim full refunds via `claim_refund`.
-    Voided,
-    /// Pool is frozen by the freeze admin; bets and claims are blocked pending review.
+    /// Pool is operational and can accept bets or claims.
+    Active,
+    /// Pool is temporarily frozen, blocking bets and claims.
     Frozen,
-    /// Pool settlement is under dispute; claims are blocked pending resolution.
+    /// Pool settlement is disputed, blocking claims pending review.
     Disputed,
 }
 
@@ -106,6 +112,34 @@ impl PredinexContract {
         env.storage().persistent().set(&DataKey::Treasury, &0i128);
     }
 
+    /// #179 — Set the per-pool creation fee (in stroops). Only the treasury
+    /// recipient may call this so the admin key is the same as the withdrawal
+    /// destination, keeping the permission model simple.
+    /// Pass 0 to remove the fee requirement.
+    pub fn set_creation_fee(env: Env, caller: Address, fee: i128) {
+        caller.require_auth();
+        let treasury_recipient: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryRecipient)
+            .expect("Not initialized");
+        if caller != treasury_recipient {
+            panic!("Unauthorized");
+        }
+        if fee < 0 {
+            panic!("Fee must be non-negative");
+        }
+        env.storage().persistent().set(&DataKey::CreationFee, &fee);
+    }
+
+    /// #179 — Return the current creation fee in stroops (0 if not set).
+    pub fn get_creation_fee(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get::<_, i128>(&DataKey::CreationFee)
+            .unwrap_or(0)
+    }
+
     /// Normalize a Soroban `String` to a comparable form by converting to
     /// lowercase bytes and stripping leading/trailing ASCII spaces.
     /// Uses a fixed 64-byte stack buffer — outcome labels longer than 64 bytes
@@ -156,6 +190,30 @@ impl PredinexContract {
             panic!("Duplicate outcome labels");
         }
 
+        // #179 — collect creation fee before writing any state so a rejection
+        // leaves the contract untouched.
+        let creation_fee: i128 = env
+            .storage()
+            .persistent()
+            .get::<_, i128>(&DataKey::CreationFee)
+            .unwrap_or(0);
+
+        if creation_fee > 0 {
+            let token_address: Address = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Token)
+                .expect("Not initialized");
+            let token_client = token::Client::new(&env, &token_address);
+            let treasury_recipient: Address = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TreasuryRecipient)
+                .expect("Not initialized");
+            // Transfer fee from creator to treasury recipient directly.
+            token_client.transfer(&creator, &treasury_recipient, &creation_fee);
+        }
+
         let pool_id = Self::get_pool_counter(&env);
 
         let created_at = env.ledger().timestamp();
@@ -204,7 +262,7 @@ impl PredinexContract {
             .expect("Pool not found");
 
         if pool.status != PoolStatus::Open {
-            panic!("Pool already settled");
+            panic!("Pool not open for betting");
         }
 
         if env.ledger().timestamp() >= pool.expiry {
@@ -340,14 +398,25 @@ impl PredinexContract {
         }
 
         pool.status = PoolStatus::Settled(winning_outcome);
+        pool.settled = true;
+        pool.winning_outcome = Some(winning_outcome);
+
+        // #171 — compute totals for the enriched settlement event so downstream
+        // consumers (indexer, frontend) can derive payout context without extra reads.
+        let winning_side_total = if winning_outcome == 0 { pool.total_a } else { pool.total_b };
+        let total_pool_volume = pool.total_a + pool.total_b;
+        // Fee basis mirrors claim_winnings: 2 % of total volume.
+        let fee_amount = (total_pool_volume * 2) / 100;
 
         env.storage()
             .persistent()
             .set(&DataKey::Pool(pool_id), &pool);
 
+        // Enriched settlement event: (caller, winning_outcome, winning_side_total,
+        //   total_pool_volume, fee_amount)
         env.events().publish(
             (Symbol::new(&env, "settle_pool"), pool_id),
-            (caller, winning_outcome),
+            (caller, winning_outcome, winning_side_total, total_pool_volume, fee_amount),
         );
     }
 
@@ -440,8 +509,8 @@ impl PredinexContract {
 
         let winning_outcome = match pool.status {
             PoolStatus::Settled(outcome) => outcome,
-            PoolStatus::Voided => panic!("Pool is voided; use claim_refund"),
-            PoolStatus::Frozen | PoolStatus::Disputed => panic!("Pool is frozen or disputed; claims are blocked"),
+            PoolStatus::Frozen => panic!("Pool is frozen; claims are blocked"),
+            PoolStatus::Disputed => panic!("Pool is disputed; claims are blocked"),
             _ => panic!("Pool not settled"),
         };
 
@@ -517,6 +586,39 @@ impl PredinexContract {
         env.storage().persistent().get(&DataKey::TreasuryRecipient)
     }
 
+    /// Rotate the treasury recipient address. Only callable by the current treasury recipient.
+    /// Emits an event with both old and new addresses for audit trail.
+    ///
+    /// # Arguments
+    /// * `caller` - Must be the current treasury recipient
+    /// * `new_recipient` - The new treasury recipient address
+    ///
+    /// # Panics
+    /// * If caller is not the current treasury recipient
+    /// * If treasury recipient is not set
+    pub fn rotate_treasury_recipient(env: Env, caller: Address, new_recipient: Address) {
+        caller.require_auth();
+
+        let current_recipient: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryRecipient)
+            .expect("Treasury recipient not set");
+
+        if caller != current_recipient {
+            panic!("Unauthorized");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::TreasuryRecipient, &new_recipient);
+
+        env.events().publish(
+            (Symbol::new(&env, "treasury_recipient_rotated"),),
+            (current_recipient, new_recipient),
+        );
+    }
+
     pub fn withdraw_treasury(env: Env, caller: Address, amount: i128) {
         caller.require_auth();
 
@@ -557,9 +659,10 @@ impl PredinexContract {
             .persistent()
             .set(&DataKey::Treasury, &(current_treasury - amount));
 
+        // Emit explicit treasury withdrawal event with caller, recipient, and amount
         env.events().publish(
-            (Symbol::new(&env, "treasury_withdrawal"), treasury_recipient),
-            amount,
+            (Symbol::new(&env, "treasury_withdrawn"),),
+            (caller.clone(), treasury_recipient, amount),
         );
     }
 
