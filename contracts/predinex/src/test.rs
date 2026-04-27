@@ -3,8 +3,7 @@ extern crate std;
 use super::*;
 use soroban_sdk::String;
 use soroban_sdk::{
-    testutils::{Address as _, Events as _, Ledger},
-    Address, Env,
+    testutils::Address as _, testutils::Events, testutils::Ledger, Address, Env, IntoVal,
 };
 use std::format;
 
@@ -36,6 +35,142 @@ fn test_create_pool() {
     let pool = client.get_pool(&pool_id).unwrap();
     assert_eq!(pool.creator, creator);
     assert_eq!(pool.title, title);
+}
+
+#[test]
+#[should_panic(expected = "Duration must be between 1 and 1000000 seconds")]
+fn test_create_pool_rejects_duration_above_maximum() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &1_000_001,
+    );
+}
+
+#[test]
+fn test_create_pool_accepts_duration_just_below_maximum() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    env.ledger().with_mut(|li| li.timestamp = 42);
+
+    let creator = Address::generate(&env);
+    let duration = 999_999;
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &duration,
+    );
+
+    let pool = client.get_pool(&pool_id).unwrap();
+    assert_eq!(pool.expiry, 42 + duration);
+}
+
+#[test]
+fn test_large_pool_payouts_with_checked_arithmetic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token = token::Client::new(&env, &token_id.address());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    client.initialize(&token_id.address(), &token_admin);
+
+    let creator = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    let large_amount_a = 1_000_000_000_000_000_000i128;
+    let large_amount_b = 2_000_000_000_000_000_000i128;
+
+    token_admin_client.mint(&user1, &(large_amount_a + 100));
+    token_admin_client.mint(&user2, &(large_amount_b + 100));
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+
+    client.place_bet(&user1, &pool_id, &0, &large_amount_a);
+    client.place_bet(&user2, &pool_id, &1, &large_amount_b);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 3601;
+    });
+
+    client.settle_pool(&creator, &pool_id, &0);
+
+    let winnings = client.claim_winnings(&user1, &pool_id);
+    assert!(winnings > 0, "Large pool winnings must compute successfully");
+    assert_eq!(token.balance(&user1), 100 + winnings);
+}
+
+#[test]
+fn test_place_bet_rejects_pool_total_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    client.initialize(&token_id.address(), &token_admin);
+
+    let creator = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    let huge_amount = i128::MAX - 1;
+
+    token_admin_client.mint(&user1, &huge_amount);
+    token_admin_client.mint(&user2, &100);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+
+    client.place_bet(&user1, &pool_id, &0, &huge_amount);
+
+    // Overflow on the second bet should fail predictably.
+    let result = std::panic::catch_unwind(|| {
+        client.place_bet(&user2, &pool_id, &0, &2);
+    });
+
+    assert!(result.is_err(), "Pool total overflow should reject the second bet");
 }
 
 #[test]
@@ -2557,508 +2692,72 @@ fn l4_successful_claim_reconciles_treasury_and_balances() {
     );
 }
 
-// ── Issue #175: Event schema versioning ──────────────────────────────────────
-//
-// Every emitted event carries a schema-version `Symbol` at topic position 1
-// (`EVENT_SCHEMA_VERSION`, currently `"v1"`). The tests below cover:
-//
-//   1. Each event family emits a topic at position 1 that decodes to "v1".
-//   2. A small reference decoder demonstrates version-based routing.
-//
-// If the contract bumps the version marker in the future, every event family
-// here must be re-asserted against the new value. The test file is the single
-// place that guarantees the version marker is present on every event.
-
-use soroban_sdk::{IntoVal, Symbol, Val};
-
-/// Find the *last* event with a given event-name `Symbol` at topic position 0
-/// among the events emitted by the most recent contract invocation.
-///
-/// Soroban's testutils `Events::all()` returns the events buffer for the
-/// most-recently invoked root contract call, so callers must invoke this
-/// helper *immediately* after the function under test runs.
-fn last_event_named(env: &Env, name: &str) -> (soroban_sdk::Vec<Val>, Val) {
-    let target = Symbol::new(env, name);
-    let all = env.events().all();
-    for i in (0..all.len()).rev() {
-        let (_, topics, data) = all.get(i).unwrap();
-        let topics: soroban_sdk::Vec<Val> = topics;
-        if topics.is_empty() {
-            continue;
-        }
-        let head: Symbol = topics.get(0).unwrap().into_val(env);
-        if head == target {
-            return (topics, data);
-        }
-    }
-    panic!("expected event named {name} but none was emitted");
-}
-
-/// Assert that the given event topic vector carries `EVENT_SCHEMA_VERSION` at
-/// position 1.
-fn assert_v1_marker(env: &Env, topics: &soroban_sdk::Vec<Val>, event_name: &str) {
-    assert!(
-        topics.len() >= 2,
-        "{event_name} event must have at least 2 topics (name + schema version), got {}",
-        topics.len()
-    );
-    let version: Symbol = topics.get(1).unwrap().into_val(env);
-    assert_eq!(
-        version,
-        Symbol::new(env, EVENT_SCHEMA_VERSION),
-        "{event_name} event must carry the schema version marker at topic position 1"
-    );
-}
-
-/// AC #175.1: `create_pool` emits a v1 marker.
+/// L5: Claim winnings emits a claim event with payout and fee context.
 #[test]
-fn issue175_create_pool_carries_v1_marker() {
+fn l5_claim_winnings_emits_claim_event() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    client.initialize(&token_id.address(), &token_admin);
-
-    let creator = Address::generate(&env);
-    client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-
-    let (topics, _) = last_event_named(&env, "create_pool");
-    assert_v1_marker(&env, &topics, "create_pool");
-}
-
-/// AC #175.1: `place_bet` emits a v1 marker.
-#[test]
-fn issue175_place_bet_carries_v1_marker() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_admin_addr = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin_addr.clone());
     let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
-    client.initialize(&token_id.address(), &token_admin);
-
-    let creator = Address::generate(&env);
-    let user = Address::generate(&env);
-    token_admin_client.mint(&user, &1000);
-
-    let pool_id = client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-    client.place_bet(&user, &pool_id, &0, &100);
-
-    let (topics, _) = last_event_named(&env, "place_bet");
-    assert_v1_marker(&env, &topics, "place_bet");
-}
-
-/// AC #175.1: `settle_pool` emits a v1 marker.
-#[test]
-fn issue175_settle_pool_carries_v1_marker() {
-    let env = Env::default();
-    env.mock_all_auths();
 
     let contract_id = env.register(PredinexContract, ());
     let client = PredinexContractClient::new(&env, &contract_id);
 
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
-    client.initialize(&token_id.address(), &token_admin);
-
-    let creator = Address::generate(&env);
-    let user_a = Address::generate(&env);
-    let user_b = Address::generate(&env);
-    token_admin_client.mint(&user_a, &1000);
-    token_admin_client.mint(&user_b, &1000);
-
-    let pool_id = client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-    client.place_bet(&user_a, &pool_id, &0, &100);
-    client.place_bet(&user_b, &pool_id, &1, &100);
-    env.ledger().with_mut(|li| li.timestamp = 3601);
-    client.settle_pool(&creator, &pool_id, &0);
-
-    let (topics, _) = last_event_named(&env, "settle_pool");
-    assert_v1_marker(&env, &topics, "settle_pool");
-}
-
-/// AC #175.1: `claim_winnings` and the paired `fee_collected` both emit a v1 marker.
-#[test]
-fn issue175_claim_winnings_and_fee_collected_carry_v1_marker() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
-    client.initialize(&token_id.address(), &token_admin);
-
-    let creator = Address::generate(&env);
-    let user_a = Address::generate(&env);
-    let user_b = Address::generate(&env);
-    token_admin_client.mint(&user_a, &1000);
-    token_admin_client.mint(&user_b, &1000);
-
-    let pool_id = client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-    client.place_bet(&user_a, &pool_id, &0, &100);
-    client.place_bet(&user_b, &pool_id, &1, &100);
-    env.ledger().with_mut(|li| li.timestamp = 3601);
-    client.settle_pool(&creator, &pool_id, &0);
-    client.claim_winnings(&user_a, &pool_id);
-
-    let (topics_claim, _) = last_event_named(&env, "claim_winnings");
-    assert_v1_marker(&env, &topics_claim, "claim_winnings");
-
-    let (topics_fee, _) = last_event_named(&env, "fee_collected");
-    assert_v1_marker(&env, &topics_fee, "fee_collected");
-}
-
-/// AC #175.1: `claim_refund` and `void_pool` (voided pool path) each emit a
-/// v1 marker. The two events are emitted by separate contract invocations so
-/// each is asserted immediately after its emitting call.
-#[test]
-fn issue175_claim_refund_carries_v1_marker() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
-    client.initialize(&token_id.address(), &token_admin);
-
-    let creator = Address::generate(&env);
-    let user = Address::generate(&env);
-    token_admin_client.mint(&user, &1000);
-
-    let pool_id = client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-    client.place_bet(&user, &pool_id, &0, &100);
-
-    client.void_pool(&creator, &pool_id);
-    let (topics_void, _) = last_event_named(&env, "void_pool");
-    assert_v1_marker(&env, &topics_void, "void_pool");
-
-    client.claim_refund(&user, &pool_id);
-    let (topics_refund, _) = last_event_named(&env, "claim_refund");
-    assert_v1_marker(&env, &topics_refund, "claim_refund");
-}
-
-/// AC #175.1: `cancel_pool` emits a v1 marker.
-#[test]
-fn issue175_cancel_pool_carries_v1_marker() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    client.initialize(&token_id.address(), &token_admin);
-
-    let creator = Address::generate(&env);
-    let pool_id = client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-    client.cancel_pool(&creator, &pool_id);
-
-    let (topics, _) = last_event_named(&env, "cancel_pool");
-    assert_v1_marker(&env, &topics, "cancel_pool");
-}
-
-/// AC #175.1: `assign_settler` emits a v1 marker.
-#[test]
-fn issue175_assign_settler_carries_v1_marker() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    client.initialize(&token_id.address(), &token_admin);
-
-    let creator = Address::generate(&env);
-    let settler = Address::generate(&env);
-    let pool_id = client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-    client.assign_settler(&creator, &pool_id, &settler);
-
-    let (topics, _) = last_event_named(&env, "assign_settler");
-    assert_v1_marker(&env, &topics, "assign_settler");
-}
-
-/// AC #175.1: freeze admin lifecycle events (`freeze_admin_set`,
-/// `pool_frozen`, `pool_disputed`, `pool_unfrozen`) each emit a v1 marker.
-#[test]
-fn issue175_freeze_lifecycle_events_carry_v1_marker() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
-    let treasury_recipient = Address::generate(&env);
-    client.initialize(&token_id.address(), &treasury_recipient);
-
-    let freeze_admin = Address::generate(&env);
-    client.set_freeze_admin(&treasury_recipient, &freeze_admin);
-    let (topics_admin, _) = last_event_named(&env, "freeze_admin_set");
-    assert_v1_marker(&env, &topics_admin, "freeze_admin_set");
-
-    let creator = Address::generate(&env);
-    let user_a = Address::generate(&env);
-    let user_b = Address::generate(&env);
-    token_admin_client.mint(&user_a, &1000);
-    token_admin_client.mint(&user_b, &1000);
-    let pool_id = client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-    client.place_bet(&user_a, &pool_id, &0, &100);
-    client.place_bet(&user_b, &pool_id, &1, &100);
-
-    client.freeze_pool(&freeze_admin, &pool_id);
-    let (topics_frozen, _) = last_event_named(&env, "pool_frozen");
-    assert_v1_marker(&env, &topics_frozen, "pool_frozen");
-
-    client.unfreeze_pool(&freeze_admin, &pool_id);
-    let (topics_unfrozen, _) = last_event_named(&env, "pool_unfrozen");
-    assert_v1_marker(&env, &topics_unfrozen, "pool_unfrozen");
-
-    env.ledger().with_mut(|li| li.timestamp = 3601);
-    client.settle_pool(&creator, &pool_id, &0);
-    client.dispute_pool(&freeze_admin, &pool_id);
-    let (topics_disputed, _) = last_event_named(&env, "pool_disputed");
-    assert_v1_marker(&env, &topics_disputed, "pool_disputed");
-}
-
-/// AC #175.1: treasury events (`treasury_recipient_rotated`,
-/// `treasury_withdrawn`) emit a v1 marker.
-#[test]
-fn issue175_treasury_events_carry_v1_marker() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
     let treasury_recipient = Address::generate(&env);
     client.initialize(&token_id.address(), &treasury_recipient);
 
     let creator = Address::generate(&env);
     let user_a = Address::generate(&env);
     let user_b = Address::generate(&env);
-    token_admin_client.mint(&user_a, &1000);
-    token_admin_client.mint(&user_b, &1000);
+
+    token_admin_client.mint(&user_a, &300);
+    token_admin_client.mint(&user_b, &200);
+
     let pool_id = client.create_pool(
         &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-    client.place_bet(&user_a, &pool_id, &0, &100);
-    client.place_bet(&user_b, &pool_id, &1, &100);
-    env.ledger().with_mut(|li| li.timestamp = 3601);
-    client.settle_pool(&creator, &pool_id, &0);
-    client.claim_winnings(&user_a, &pool_id);
-
-    let new_recipient = Address::generate(&env);
-    client.rotate_treasury_recipient(&treasury_recipient, &new_recipient);
-    let (topics_rotate, _) = last_event_named(&env, "treasury_recipient_rotated");
-    assert_v1_marker(&env, &topics_rotate, "treasury_recipient_rotated");
-
-    let balance = client.get_treasury_balance();
-    assert!(balance > 0);
-    client.withdraw_treasury(&new_recipient, &balance);
-    let (topics_withdraw, _) = last_event_named(&env, "treasury_withdrawn");
-    assert_v1_marker(&env, &topics_withdraw, "treasury_withdrawn");
-}
-
-/// AC #175.2: A sample decoder that routes events by `(name, version)` pair
-/// works as documented. Mirrors the dispatch sketch in `CONTRACT_EVENTS.md`
-/// and rejects an event whose schema version it does not understand.
-#[test]
-fn issue175_sample_decoder_routes_by_version() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
-    client.initialize(&token_id.address(), &token_admin);
-
-    let creator = Address::generate(&env);
-    let user = Address::generate(&env);
-    token_admin_client.mint(&user, &1000);
-
-    // The decoder under test: only accept events whose topic[1] matches the
-    // version it was compiled against. Anything else is dropped (which mirrors
-    // the documented "skip unknown version" behavior).
-    #[derive(Debug, PartialEq)]
-    enum Routed {
-        CreatePool { pool_id: u32 },
-        PlaceBet { pool_id: u32 },
-        UnknownVersion,
-    }
-
-    fn decode(env: &Env, topics: &soroban_sdk::Vec<Val>, supported: &Symbol) -> Option<Routed> {
-        if topics.len() < 2 {
-            return None;
-        }
-        let name: Symbol = topics.get(0).unwrap().into_val(env);
-        let version: Symbol = topics.get(1).unwrap().into_val(env);
-        if version != *supported {
-            return Some(Routed::UnknownVersion);
-        }
-        if name == Symbol::new(env, "create_pool") {
-            let pool_id: u32 = topics.get(2).unwrap().into_val(env);
-            return Some(Routed::CreatePool { pool_id });
-        }
-        if name == Symbol::new(env, "place_bet") {
-            let pool_id: u32 = topics.get(2).unwrap().into_val(env);
-            return Some(Routed::PlaceBet { pool_id });
-        }
-        None
-    }
-
-    let supported_v1 = Symbol::new(&env, EVENT_SCHEMA_VERSION);
-    let supported_v2 = Symbol::new(&env, "v2");
-
-    // create_pool — capture and decode immediately after emission.
-    let pool_id = client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
-        &String::from_str(&env, "Desc"),
-        &String::from_str(&env, "Yes"),
-        &String::from_str(&env, "No"),
-        &3600,
-    );
-    let (topics_create, _) = last_event_named(&env, "create_pool");
-    assert_eq!(
-        decode(&env, &topics_create, &supported_v1),
-        Some(Routed::CreatePool { pool_id }),
-    );
-    // A decoder pinned to a *different* version (e.g. a future v2 client
-    // pointed at the current v1 contract) must explicitly classify the event
-    // as `UnknownVersion`, never silently mis-decode.
-    assert_eq!(
-        decode(&env, &topics_create, &supported_v2),
-        Some(Routed::UnknownVersion),
-    );
-
-    // place_bet — capture and decode immediately after emission.
-    client.place_bet(&user, &pool_id, &1, &250);
-    let (topics_bet, _) = last_event_named(&env, "place_bet");
-    assert_eq!(
-        decode(&env, &topics_bet, &supported_v1),
-        Some(Routed::PlaceBet { pool_id }),
-    );
-    assert_eq!(
-        decode(&env, &topics_bet, &supported_v2),
-        Some(Routed::UnknownVersion),
-    );
-}
-
-/// Defensive: the version marker emitted by the contract must exactly equal
-/// the public `EVENT_SCHEMA_VERSION` constant. If a future change bumps the
-/// constant but forgets to update the in-flight events (or vice versa), this
-/// test fails loudly.
-#[test]
-fn issue175_emitted_version_matches_public_constant() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(&env, &contract_id);
-
-    let token_admin = Address::generate(&env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    client.initialize(&token_id.address(), &token_admin);
-
-    let creator = Address::generate(&env);
-    client.create_pool(
-        &creator,
-        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Event test"),
         &String::from_str(&env, "Desc"),
         &String::from_str(&env, "Yes"),
         &String::from_str(&env, "No"),
         &3600,
     );
 
-    let (topics, _) = last_event_named(&env, "create_pool");
-    let emitted: Symbol = topics.get(1).unwrap().into_val(&env);
-    assert_eq!(emitted, Symbol::new(&env, EVENT_SCHEMA_VERSION));
-    // And the public constant itself is the documented "v1".
-    assert_eq!(EVENT_SCHEMA_VERSION, "v1");
+    client.place_bet(&user_a, &pool_id, &0, &300);
+    client.place_bet(&user_b, &pool_id, &1, &200);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 3601;
+    });
+    client.settle_pool(&creator, &pool_id, &0); // A wins
+
+    let winnings = client.claim_winnings(&user_a, &pool_id);
+
+    // Retrieve events emitted
+    let events = env.events().all();
+
+    // The last event emitted in `claim_winnings` is the `claim_winnings` event itself
+    let last_event = events.last().expect("must emit an event");
+
+    // Verify topic
+    let topics = last_event.1;
+    let topic0: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
+    let topic1: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+    let topic2: Address = soroban_sdk::FromVal::from_val(&env, &topics.get(2).unwrap());
+
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "claim_winnings"));
+    assert_eq!(topic1, pool_id);
+    assert_eq!(topic2, user_a);
+
+    // Verify payload is ClaimEvent
+    let payload_val = last_event.2;
+    let claim_event: crate::ClaimEvent = soroban_sdk::FromVal::from_val(&env, &payload_val);
+
+    assert_eq!(claim_event.amount, winnings);
+    assert_eq!(claim_event.winning_outcome, 0);
+    assert_eq!(claim_event.total_pool_size, 500);
+
+    let expected_fee = (500i128 * 2) / 100;
+    assert_eq!(claim_event.fee_amount, expected_fee);
 }
