@@ -810,9 +810,31 @@ impl PredinexContract {
     ///
     ///   1. All reads and validations (no mutations yet).
     ///   2. Token transfer to the winner — if this fails, no state has changed.
-    ///   3. Treasury ledger update — reflects the fee collected by the transfer.
-    ///   4. Remove the bet record — prevents any future duplicate-claim attempt.
-    ///   5. Emit events — always last so they reflect final committed state.
+    ///   3. Update the per-pool payout state (#158) so reconciliation holds.
+    ///   4. Treasury ledger update — fee credited *once* per pool, plus the
+    ///      payout-rounding dust on the final claim.
+    ///   5. Remove the bet record — prevents any future duplicate-claim attempt.
+    ///   6. Emit events — always last so they reflect final committed state.
+    ///
+    /// # Payout rounding policy (#158)
+    /// Per-claim payout is computed via integer floor division:
+    ///
+    ///     winnings = floor(user_winning_bet * net_pool_balance / pool_winning_total)
+    ///
+    /// where `net_pool_balance = total_pool_balance - fee` and
+    /// `fee = floor(total_pool_balance * 2 / 100)`. Because every claim rounds
+    /// down, the sum of winner payouts can be up to `n_winners - 1` token
+    /// units below `net_pool_balance`. That residual ("payout dust") is
+    /// **swept to the treasury** on the claim that brings the cumulative
+    /// claimed winning stake up to `pool_winning_total` (i.e. the final
+    /// winner). The 2 % protocol fee is credited to the treasury only on the
+    /// **first** claim. After every winner has claimed:
+    ///
+    ///     total_pool_balance == fee + payout_dust + sum(payouts)
+    ///     contract_balance_attributable_to_pool == fee + payout_dust
+    ///                                           == treasury_credit_for_pool
+    ///
+    /// See `web/docs/PAYOUT_ROUNDING.md` for indexer / UI guidance.
     pub fn claim_winnings(env: Env, user: Address, pool_id: u32) -> i128 {
         user.require_auth();
 
@@ -859,6 +881,32 @@ impl PredinexContract {
 
         let winnings = (user_winning_bet * net_pool_balance) / pool_winning_total;
 
+        // #158 — load (or default) the per-pool payout state and figure out
+        // (a) whether this is the first claim (so we credit the fee), and
+        // (b) whether this is the final claim (so we sweep payout dust).
+        // Decide both *before* any mutation so the math is straightforward.
+        let mut payout_state: PoolPayoutState = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PoolPayoutState(pool_id))
+            .unwrap_or_default();
+
+        let is_first_claim = !payout_state.fee_credited;
+        let new_claimed_winning_stake = payout_state.claimed_winning_stake + user_winning_bet;
+        let new_paid_out = payout_state.paid_out + winnings;
+        let is_final_claim = new_claimed_winning_stake == pool_winning_total;
+
+        // The dust is the residual of the floor-division payouts. By
+        // construction it is non-negative and strictly less than `n_winners`
+        // token units. It is swept to the treasury exclusively on the final
+        // claim so reconciliation `total_pool_balance == fee + dust + sum(payouts)`
+        // holds the moment the last winner withdraws.
+        let payout_dust: i128 = if is_final_claim {
+            net_pool_balance - new_paid_out
+        } else {
+            0
+        };
+
         // Step 2: transfer tokens to the winner first. If the transfer fails the
         // transaction reverts and treasury/bet state remain unchanged.
         let token_address = env
@@ -882,7 +930,23 @@ impl PredinexContract {
             .persistent()
             .set(&DataKey::Treasury, &updated_treasury);
 
-        // Step 4: remove the bet record to prevent duplicate claims.
+        // Step 4: credit the treasury ledger. The fee is added once (on the
+        // first claim) and the payout-rounding dust is added on the final
+        // claim. Both quantities also remain in the contract's token balance
+        // so `contract_balance == treasury` reconciles after the final claim.
+        let treasury_delta = (if is_first_claim { fee } else { 0 }) + payout_dust;
+        if treasury_delta > 0 {
+            let current_treasury: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Treasury)
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Treasury, &(current_treasury + treasury_delta));
+        }
+
+        // Step 5: remove the bet record to prevent duplicate claims.
         env.storage()
             .persistent()
             .remove(&DataKey::UserBet(pool_id, user.clone()));
@@ -899,6 +963,16 @@ impl PredinexContract {
         );
 
         winnings
+    }
+
+    /// #158 — Return the per-pool payout-tracking state, or `None` if the
+    /// pool has not yet had any winners claim. Useful for indexers and UI
+    /// previews that want to display pending dust or check whether the
+    /// protocol fee has been credited yet.
+    pub fn get_pool_payout_state(env: Env, pool_id: u32) -> Option<PoolPayoutState> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PoolPayoutState(pool_id))
     }
 
     pub fn get_treasury_balance(env: Env) -> i128 {
