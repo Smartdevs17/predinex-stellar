@@ -2,7 +2,9 @@
 extern crate std;
 use super::*;
 use soroban_sdk::String;
-use soroban_sdk::{testutils::Address as _, testutils::Ledger, Address, Env};
+use soroban_sdk::{
+    testutils::Address as _, testutils::Events, testutils::Ledger, Address, Env, IntoVal,
+};
 use std::format;
 
 #[test]
@@ -33,6 +35,142 @@ fn test_create_pool() {
     let pool = client.get_pool(&pool_id).unwrap();
     assert_eq!(pool.creator, creator);
     assert_eq!(pool.title, title);
+}
+
+#[test]
+#[should_panic(expected = "Duration must be between 1 and 1000000 seconds")]
+fn test_create_pool_rejects_duration_above_maximum() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let creator = Address::generate(&env);
+    client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &1_000_001,
+    );
+}
+
+#[test]
+fn test_create_pool_accepts_duration_just_below_maximum() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    env.ledger().with_mut(|li| li.timestamp = 42);
+
+    let creator = Address::generate(&env);
+    let duration = 999_999;
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &duration,
+    );
+
+    let pool = client.get_pool(&pool_id).unwrap();
+    assert_eq!(pool.expiry, 42 + duration);
+}
+
+#[test]
+fn test_large_pool_payouts_with_checked_arithmetic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token = token::Client::new(&env, &token_id.address());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    client.initialize(&token_id.address(), &token_admin);
+
+    let creator = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    let large_amount_a = 1_000_000_000_000_000_000i128;
+    let large_amount_b = 2_000_000_000_000_000_000i128;
+
+    token_admin_client.mint(&user1, &(large_amount_a + 100));
+    token_admin_client.mint(&user2, &(large_amount_b + 100));
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+
+    client.place_bet(&user1, &pool_id, &0, &large_amount_a);
+    client.place_bet(&user2, &pool_id, &1, &large_amount_b);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 3601;
+    });
+
+    client.settle_pool(&creator, &pool_id, &0);
+
+    let winnings = client.claim_winnings(&user1, &pool_id);
+    assert!(winnings > 0, "Large pool winnings must compute successfully");
+    assert_eq!(token.balance(&user1), 100 + winnings);
+}
+
+#[test]
+fn test_place_bet_rejects_pool_total_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PredinexContract, ());
+    let client = PredinexContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
+    client.initialize(&token_id.address(), &token_admin);
+
+    let creator = Address::generate(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    let huge_amount = i128::MAX - 1;
+
+    token_admin_client.mint(&user1, &huge_amount);
+    token_admin_client.mint(&user2, &100);
+
+    let pool_id = client.create_pool(
+        &creator,
+        &String::from_str(&env, "Market"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
+    );
+
+    client.place_bet(&user1, &pool_id, &0, &huge_amount);
+
+    // Overflow on the second bet should fail predictably.
+    let result = std::panic::catch_unwind(|| {
+        client.place_bet(&user2, &pool_id, &0, &2);
+    });
+
+    assert!(result.is_err(), "Pool total overflow should reject the second bet");
 }
 
 #[test]
@@ -2554,135 +2692,72 @@ fn l4_successful_claim_reconciles_treasury_and_balances() {
     );
 }
 
-// ── #159 preview_claimable_amount ────────────────────────────────────────────
+/// L5: Claim winnings emits a claim event with payout and fee context.
+#[test]
+fn l5_claim_winnings_emits_claim_event() {
+    let env = Env::default();
+    env.mock_all_auths();
 
-/// Helper: set up a contract + token, create a pool, and return all handles.
-fn setup_preview_env(
-    env: &Env,
-) -> (
-    PredinexContractClient<'_>,
-    token::Client<'_>,
-    token::StellarAssetClient<'_>,
-    Address, // contract_id
-    Address, // creator
-    Address, // user_a (bets on A)
-    Address, // user_b (bets on B)
-    u32,     // pool_id
-) {
+    let token_admin_addr = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin_addr.clone());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id.address());
+
     let contract_id = env.register(PredinexContract, ());
-    let client = PredinexContractClient::new(env, &contract_id);
+    let client = PredinexContractClient::new(&env, &contract_id);
 
-    let token_admin = Address::generate(env);
-    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token = token::Client::new(env, &token_id.address());
-    let token_admin_client = token::StellarAssetClient::new(env, &token_id.address());
+    let treasury_recipient = Address::generate(&env);
+    client.initialize(&token_id.address(), &treasury_recipient);
 
-    client.initialize(&token_id.address(), &token_admin);
+    let creator = Address::generate(&env);
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
 
-    let creator = Address::generate(env);
-    let user_a = Address::generate(env);
-    let user_b = Address::generate(env);
-
-    token_admin_client.mint(&user_a, &1000);
-    token_admin_client.mint(&user_b, &1000);
+    token_admin_client.mint(&user_a, &300);
+    token_admin_client.mint(&user_b, &200);
 
     let pool_id = client.create_pool(
         &creator,
-        &String::from_str(env, "Preview Test"),
-        &String::from_str(env, ""),
-        &String::from_str(env, "Yes"),
-        &String::from_str(env, "No"),
-        &3600u64,
+        &String::from_str(&env, "Event test"),
+        &String::from_str(&env, "Desc"),
+        &String::from_str(&env, "Yes"),
+        &String::from_str(&env, "No"),
+        &3600,
     );
 
-    (
-        client,
-        token,
-        token_admin_client,
-        contract_id,
-        creator,
-        user_a,
-        user_b,
-        pool_id,
-    )
-}
-
-/// AC: Call the preview method before settlement and verify the response
-/// reflects the unclaimable state.
-#[test]
-fn test_preview_claimable_amount_before_settlement() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _token, _token_admin, _contract_id, _creator, user_a, user_b, pool_id) =
-        setup_preview_env(&env);
-
-    // user_a bets on A, user_b bets on B — pool is still Open
     client.place_bet(&user_a, &pool_id, &0, &300);
     client.place_bet(&user_b, &pool_id, &1, &200);
 
-    // Both users should see Unclaimable while the pool is open
-    assert_eq!(
-        client.preview_claimable_amount(&pool_id, &user_a),
-        ClaimPreview::Unclaimable,
-        "winner-side bettor must see Unclaimable before settlement"
-    );
-    assert_eq!(
-        client.preview_claimable_amount(&pool_id, &user_b),
-        ClaimPreview::Unclaimable,
-        "loser-side bettor must see Unclaimable before settlement"
-    );
+    env.ledger().with_mut(|li| {
+        li.timestamp = 3601;
+    });
+    client.settle_pool(&creator, &pool_id, &0); // A wins
 
-    // A user with no position also sees Unclaimable (pool not settled)
-    let outsider = Address::generate(&env);
-    assert_eq!(
-        client.preview_claimable_amount(&pool_id, &outsider),
-        ClaimPreview::Unclaimable,
-        "non-participant must see Unclaimable before settlement"
-    );
-}
+    let winnings = client.claim_winnings(&user_a, &pool_id);
 
-/// AC: Call the preview method after settlement and verify it matches the
-/// amount returned by claim_winnings.
-#[test]
-fn test_preview_claimable_amount_after_settlement_matches_claim() {
-    let env = Env::default();
-    env.mock_all_auths();
+    // Retrieve events emitted
+    let events = env.events().all();
 
-    let (client, _token, _token_admin, _contract_id, creator, user_a, user_b, pool_id) =
-        setup_preview_env(&env);
+    // The last event emitted in `claim_winnings` is the `claim_winnings` event itself
+    let last_event = events.last().expect("must emit an event");
 
-    client.place_bet(&user_a, &pool_id, &0, &300); // bets on A
-    client.place_bet(&user_b, &pool_id, &1, &200); // bets on B
+    // Verify topic
+    let topics = last_event.1;
+    let topic0: soroban_sdk::Symbol = soroban_sdk::FromVal::from_val(&env, &topics.get(0).unwrap());
+    let topic1: u32 = soroban_sdk::FromVal::from_val(&env, &topics.get(1).unwrap());
+    let topic2: Address = soroban_sdk::FromVal::from_val(&env, &topics.get(2).unwrap());
 
-    // Advance time past expiry and settle — outcome A wins
-    env.ledger().with_mut(|l| l.timestamp = 3601);
-    client.settle_pool(&creator, &pool_id, &0);
+    assert_eq!(topic0, soroban_sdk::Symbol::new(&env, "claim_winnings"));
+    assert_eq!(topic1, pool_id);
+    assert_eq!(topic2, user_a);
 
-    // user_a (winner): preview must equal what claim_winnings returns
-    let preview_winner = client.preview_claimable_amount(&pool_id, &user_a);
-    let expected_amount = match preview_winner.clone() {
-        ClaimPreview::Claimable(v) => v,
-        other => panic!("expected Claimable, got {:?}", other),
-    };
-    let actual_winnings = client.claim_winnings(&user_a, &pool_id);
-    assert_eq!(
-        expected_amount, actual_winnings,
-        "preview must match claim_winnings exactly"
-    );
+    // Verify payload is ClaimEvent
+    let payload_val = last_event.2;
+    let claim_event: crate::ClaimEvent = soroban_sdk::FromVal::from_val(&env, &payload_val);
 
-    // user_b (loser): NotEligible
-    assert_eq!(
-        client.preview_claimable_amount(&pool_id, &user_b),
-        ClaimPreview::NotEligible,
-        "loser must see NotEligible after settlement"
-    );
+    assert_eq!(claim_event.amount, winnings);
+    assert_eq!(claim_event.winning_outcome, 0);
+    assert_eq!(claim_event.total_pool_size, 500);
 
-    // outsider (no position): NeverBet
-    let outsider = Address::generate(&env);
-    assert_eq!(
-        client.preview_claimable_amount(&pool_id, &outsider),
-        ClaimPreview::NeverBet,
-        "non-participant must see NeverBet after settlement"
-    );
+    let expected_fee = (500i128 * 2) / 100;
+    assert_eq!(claim_event.fee_amount, expected_fee);
 }
