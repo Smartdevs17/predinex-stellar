@@ -16,6 +16,7 @@ vi.mock('@/components/WalletAdapterProvider', () => ({
 vi.mock('../../app/lib/adapters/predinex-contract', () => ({
   predinexContract: {
     createPoolMirrorSoroban: vi.fn(),
+    cancelPoolMirrorSoroban: vi.fn(),
   },
 }));
 
@@ -24,6 +25,7 @@ vi.mock('@/app/lib/runtime-config', () => ({
 }));
 
 const mockCreatePoolMirror = vi.mocked(predinexContract.createPoolMirrorSoroban);
+const mockCancelPoolMirror = vi.mocked(predinexContract.cancelPoolMirrorSoroban);
 
 const connectedWallet = {
   chain: 'stacks' as const,
@@ -152,11 +154,34 @@ describe('CrossChainPoolMirror', () => {
     expect(mockCreatePoolMirror).not.toHaveBeenCalled();
   });
 
-  it('does not surface a silent no-op when cancelling a pending mirror', async () => {
+  it('lists the mirror it just created instead of reporting success with no record', async () => {
     const user = userEvent.setup();
+    mockCreatePoolMirror.mockResolvedValue({ txHash: '0xtx', unifiedPoolId: 42 });
+
+    renderWithProviders(<CrossChainPoolMirror poolId={7} isCreator />);
+    await openCreateForm(user);
+    await user.click(screen.getByTestId('mirror-create-submit'));
+
+    expect(await screen.findByText(/mirror to ethereum created \(unified pool #42\)/i)).toBeInTheDocument();
+    // The confirmation names the transaction, so it can be checked on-chain.
+    expect(screen.getByText(/Transaction 0xtx/)).toBeInTheDocument();
+    // The mirror is now visible, and the empty state no longer contradicts it.
+    expect(screen.getByText('Ethereum')).toBeInTheDocument();
+    expect(screen.queryByText(/no cross-chain mirrors yet/i)).not.toBeInTheDocument();
+
+    // A chain that now has a mirror is no longer offered as a target.
+    await openCreateForm(user);
+    expect(screen.queryByRole('button', { name: /ethereum/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /polygon/i })).toBeInTheDocument();
+  });
+
+  it('calls cancel_pool_mirror and drops the mirror once the contract accepts it', async () => {
+    const user = userEvent.setup();
+    mockCancelPoolMirror.mockResolvedValue({ txHash: '0xcancel' });
+
     renderWithProviders(
       <CrossChainPoolMirror
-        poolId={1}
+        poolId={7}
         isCreator
         existingMirrors={[
           { chain: 'ethereum', poolId: 99, status: 'pending', createdAt: Date.now() },
@@ -164,9 +189,39 @@ describe('CrossChainPoolMirror', () => {
       />
     );
 
-    await user.click(screen.getByRole('button', { name: /cancel/i }));
+    await user.click(screen.getByTestId('mirror-cancel-ethereum'));
 
-    expect(await screen.findByText(/cancelling a pending mirror is not yet supported/i)).toBeInTheDocument();
-    expect(mockCreatePoolMirror).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(mockCancelPoolMirror).toHaveBeenCalledWith(
+        expect.objectContaining({ poolId: 7 })
+      );
+    });
+
+    expect(await screen.findByText(/mirror to ethereum cancelled\. transaction 0xcancel/i)).toBeInTheDocument();
+    // The cancelled mirror is gone from the list.
+    await waitFor(() => {
+      expect(screen.queryByText('Ethereum')).not.toBeInTheDocument();
+    });
+  });
+
+  it('keeps the mirror listed and explains the failure when the cancel is rejected', async () => {
+    const user = userEvent.setup();
+    mockCancelPoolMirror.mockRejectedValue(new Error('Mirror not found'));
+
+    renderWithProviders(
+      <CrossChainPoolMirror
+        poolId={7}
+        isCreator
+        existingMirrors={[
+          { chain: 'ethereum', poolId: 99, status: 'pending', createdAt: Date.now() },
+        ]}
+      />
+    );
+
+    await user.click(screen.getByTestId('mirror-cancel-ethereum'));
+
+    expect(await screen.findByText(/could not cancel the ethereum mirror: mirror not found/i)).toBeInTheDocument();
+    // Nothing was cancelled on-chain, so the mirror is still shown.
+    expect(screen.getByText('Ethereum')).toBeInTheDocument();
   });
 });

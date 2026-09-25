@@ -4,6 +4,7 @@
 #![no_std]
 
 pub mod analytics;
+pub mod interest_rate;
 pub mod reserve;
 pub mod types;
 pub mod withdraw;

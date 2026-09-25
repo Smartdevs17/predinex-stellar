@@ -816,6 +816,35 @@ export class SorobanTransactionService {
     return this.executeWithFeePrompt(tx, wallet, onStageChange, onFeeEstimated);
   }
 
+  async cancelPoolMirror(
+    wallet: FreighterWalletClient,
+    contractId: string,
+    params: { sourcePoolId: number },
+    onStageChange?: (stage: TxStage) => void,
+    onFeeEstimated?: (feeStroops: string) => Promise<boolean>,
+  ): Promise<SorobanTxResult> {
+    if (!wallet.address) throw new Error("Wallet not connected");
+
+    const contract = new Contract(contractId);
+    const sourceAccount = await this.server.getAccount(wallet.address);
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: "1000",
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "cancel_pool_mirror",
+          new Address(wallet.address).toScVal(),
+          nativeToScVal(params.sourcePoolId, { type: "u32" }),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    return this.executeWithFeePrompt(tx, wallet, onStageChange, onFeeEstimated);
+  }
+
   private async pollForSuccess(txHash: string): Promise<SorobanTxResult> {
     let attempts = 0;
     while (attempts < 20) {

@@ -220,6 +220,39 @@ export const predinexContract = {
   },
 
   /**
+   * Submit a `cancel_pool_mirror` Soroban contract call (wallet prompt).
+   *
+   * Removes a pending mirror so the pool can be mirrored again. A mirror the
+   * bridge has already settled cannot be cancelled; the contract rejects that
+   * with `PoolAlreadySettled` (#1097).
+   *
+   * @returns The transaction hash of the accepted cancellation.
+   */
+  async cancelPoolMirrorSoroban(params: {
+    wallet: FreighterWalletClient;
+    poolId: number;
+    onStageChange?: (stage: TxStage) => void;
+    onFeeEstimated?: (feeStroops: string) => Promise<boolean>;
+  }): Promise<{ txHash: string }> {
+    const { soroban } = getRuntimeConfig();
+    const service = getSorobanService();
+
+    const result = await service.cancelPoolMirror(
+      params.wallet,
+      soroban.contractId,
+      { sourcePoolId: params.poolId },
+      params.onStageChange,
+      params.onFeeEstimated
+    );
+
+    if (result.status === 'FAILED') {
+      throw new Error(result.error || 'Transaction failed');
+    }
+
+    return { txHash: result.txHash };
+  },
+
+  /**
    * Submit a `place_bet` Soroban contract call (wallet prompt).
    */
   async placeBetSoroban(params: {

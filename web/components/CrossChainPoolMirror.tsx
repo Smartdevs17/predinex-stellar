@@ -52,13 +52,23 @@ export default function CrossChainPoolMirror({
   const [showMirrorForm, setShowMirrorForm] = useState(false);
   const [selectedTargetChain, setSelectedTargetChain] = useState<ChainIdValue>('ethereum');
   const [loading, setLoading] = useState(false);
+  const [cancellingChain, setCancellingChain] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // Mirrors confirmed on-chain during this session, merged over the `existingMirrors`
+  // prop. Without this the list would still read "no mirrors" after a confirmed
+  // create, so the UI would contradict its own success message.
+  const [sessionMirrors, setSessionMirrors] = useState<PoolMirror[]>([]);
+  const [cancelledChains, setCancelledChains] = useState<string[]>([]);
+
+  const mirrors = [...existingMirrors, ...sessionMirrors].filter(
+    m => !cancelledChains.includes(m.chain.toLowerCase())
+  );
 
   const availableTargetChains = SUPPORTED_CHAINS.filter(
     chain =>
       chain.id !== SOURCE_CHAIN &&
-      !existingMirrors.some(m => m.chain.toLowerCase() === chain.id)
+      !mirrors.some(m => m.chain.toLowerCase() === chain.id)
   );
 
   const handleCreateMirror = async () => {
@@ -76,7 +86,7 @@ export default function CrossChainPoolMirror({
         );
       }
 
-      const { unifiedPoolId } = await predinexContract.createPoolMirrorSoroban({
+      const { txHash, unifiedPoolId } = await predinexContract.createPoolMirrorSoroban({
         wallet,
         poolId,
         sourceChain: SOURCE_CHAIN,
@@ -84,10 +94,22 @@ export default function CrossChainPoolMirror({
         bridgeContractId: soroban.bridgeContractId,
       });
 
+      // The contract stores one mirror per source pool, so a chain that now has a
+      // mirror can never be targeted again. Recording it here is what keeps the
+      // target list and the mirror list consistent.
+      const targetChain = selectedTargetChain;
+      setSessionMirrors(prev => [
+        ...prev.filter(m => m.chain !== targetChain),
+        { chain: targetChain, poolId, status: 'pending', createdAt: Date.now() },
+      ]);
+
+      // Only a confirmed transaction reports success, and it names the
+      // transaction so the claim can be checked against the ledger rather than
+      // taken on the UI's word.
       setSuccess(
         unifiedPoolId > 0
-          ? `Mirror to ${getChainName(selectedTargetChain)} created (unified pool #${unifiedPoolId}). The bridge will settle it once the target chain confirms the registration.`
-          : `Mirror to ${getChainName(selectedTargetChain)} created. The bridge will settle it once the target chain confirms the registration.`
+          ? `Mirror to ${getChainName(targetChain)} created (unified pool #${unifiedPoolId}). The bridge will settle it once the target chain confirms the registration. Transaction ${txHash}.`
+          : `Mirror to ${getChainName(targetChain)} created. The bridge will settle it once the target chain confirms the registration. Transaction ${txHash}.`
       );
       setShowMirrorForm(false);
     } catch (err) {
@@ -97,14 +119,35 @@ export default function CrossChainPoolMirror({
     }
   };
 
-  const handleCancelMirror = () => {
+  const handleCancelMirror = async (chain: string) => {
     if (!wallet.address || !isCreator) return;
 
-    // The on-chain contract has no `cancel_pool_mirror` entry point yet.
-    // Surface an explicit error instead of silently doing nothing.
-    setError(
-      'Cancelling a pending mirror is not yet supported by the on-chain contract. The mirror will remain active until the bridge settles it.'
-    );
+    try {
+      setCancellingChain(chain);
+      setError(null);
+      setSuccess(null);
+
+      // Only drop the mirror from the list once the contract has accepted the
+      // cancellation, so a rejected cancel leaves the UI showing the truth.
+      const { txHash } = await predinexContract.cancelPoolMirrorSoroban({
+        wallet,
+        poolId,
+      });
+
+      setCancelledChains(prev => [...prev, chain.toLowerCase()]);
+      setSessionMirrors(prev => prev.filter(m => m.chain !== chain));
+      setSuccess(
+        `Mirror to ${getChainName(chain)} cancelled. Transaction ${txHash}.`
+      );
+    } catch (err) {
+      setError(
+        `Could not cancel the ${getChainName(chain)} mirror: ${
+          err instanceof Error ? err.message : 'Failed to cancel mirror'
+        } The mirror is still active and will settle once the bridge confirms it.`
+      );
+    } finally {
+      setCancellingChain(null);
+    }
   };
 
   return (
@@ -140,11 +183,11 @@ export default function CrossChainPoolMirror({
       )}
 
       {/* Existing Mirrors */}
-      {existingMirrors.length > 0 && (
+      {mirrors.length > 0 && (
         <div className="mb-6 space-y-2">
           <p className="text-sm font-medium text-muted-foreground">Active Mirrors</p>
           <div className="space-y-2">
-            {existingMirrors.map((mirror) => {
+            {mirrors.map((mirror) => {
               const chain = SUPPORTED_CHAINS.find(c => c.id === mirror.chain.toLowerCase());
               return (
                 <div key={mirror.chain} className="flex items-center justify-between p-3 bg-muted/30 rounded-lg border border-border/40">
@@ -168,10 +211,12 @@ export default function CrossChainPoolMirror({
                     </span>
                     {isCreator && mirror.status === 'pending' && (
                       <button
-                        onClick={handleCancelMirror}
-                        className="px-2 py-1 text-xs text-red-300 hover:bg-red-500/10 rounded transition-colors"
+                        onClick={() => handleCancelMirror(mirror.chain)}
+                        disabled={cancellingChain === mirror.chain}
+                        data-testid={`mirror-cancel-${mirror.chain}`}
+                        className="px-2 py-1 text-xs text-red-300 hover:bg-red-500/10 rounded transition-colors disabled:opacity-50"
                       >
-                        Cancel
+                        {cancellingChain === mirror.chain ? 'Cancelling...' : 'Cancel'}
                       </button>
                     )}
                   </div>
@@ -235,7 +280,7 @@ export default function CrossChainPoolMirror({
       )}
 
       {/* Empty State */}
-      {existingMirrors.length === 0 && !showMirrorForm && (
+      {mirrors.length === 0 && !showMirrorForm && (
         <p className="text-sm text-muted-foreground text-center py-4">
           {isCreator
             ? 'No cross-chain mirrors yet. Create one to expand your pool to other networks.'
