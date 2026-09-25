@@ -696,6 +696,17 @@ fn emit_mirror_created(env: &Env, pool_id: u32, payload: MirrorCreatedEvent) {
     );
 }
 
+fn emit_mirror_cancelled(env: &Env, pool_id: u32, payload: MirrorCancelledEvent) {
+    env.events().publish(
+        (
+            Symbol::new(env, "mirror_cancelled"),
+            event_version(env),
+            pool_id,
+        ),
+        payload,
+    );
+}
+
 fn emit_pool_cooling_overridden(env: &Env, pool_id: u32, caller: Address) {
     env.events().publish(
         (
@@ -2120,6 +2131,18 @@ pub struct MirrorCreatedEvent {
     pub source_pool_id: u32,
     pub unified_pool_id: u32,
     pub source_chain: ChainId,
+    pub target_chain: ChainId,
+}
+
+/// #1097 — Event payload emitted when a pending pool mirror is cancelled.
+///
+/// The `unified_pool_id` is reported so an indexer can retire the cross-chain
+/// identifier the cancelled mirror was holding.
+#[derive(Clone)]
+#[contracttype]
+pub struct MirrorCancelledEvent {
+    pub source_pool_id: u32,
+    pub unified_pool_id: u32,
     pub target_chain: ChainId,
 }
 
@@ -9850,6 +9873,51 @@ impl PredinexContract {
             },
         );
         Ok(unified_id)
+    }
+
+    /// #1097 — Cancel a pending pool mirror.
+    ///
+    /// Removes the mirror record so the pool can be mirrored again, and retires
+    /// the `unified_pool_id` it was holding by dropping the reverse index. The
+    /// counter itself is *not* rewound: unified ids stay monotonic so an id
+    /// retired here can never be handed to a different pool later.
+    ///
+    /// Only an unsettled mirror can be cancelled. Once the bridge has settled
+    /// it there is nothing left to withdraw, and `settle_mirror_from_source`
+    /// needs the record to stay put.
+    pub fn cancel_pool_mirror(
+        env: Env,
+        caller: Address,
+        source_pool_id: u32,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::require_treasury_recipient(&env, &caller)?;
+        let mirror: PoolMirrorConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PoolMirror(source_pool_id))
+            .ok_or(ContractError::MirrorNotFound)?;
+        if mirror.is_settled {
+            return Err(ContractError::PoolAlreadySettled);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PoolMirror(source_pool_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::MirrorByUnifiedId(mirror.unified_pool_id));
+
+        emit_mirror_cancelled(
+            &env,
+            source_pool_id,
+            MirrorCancelledEvent {
+                source_pool_id,
+                unified_pool_id: mirror.unified_pool_id,
+                target_chain: mirror.target_chain,
+            },
+        );
+        Ok(())
     }
 
     pub fn settle_mirror_from_source(

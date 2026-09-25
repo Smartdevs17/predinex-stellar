@@ -55,7 +55,7 @@ jobs:
             exit 1
           }
 
-- name: Bundle size budget check
+      - name: Bundle size budget check
         if: github.event_name == 'pull_request'
         run: |
           # Budget definitions (KB). Update intentionally with a comment explaining the reason.
@@ -236,7 +236,6 @@ jobs:
       - name: Lint Contract API Docs
         working-directory: .
         run: python3 scripts/lint-contract-api.py
- (fix(ci): restore green CI on main)
 
       - name: Measure current contract WASM size
         id: wasm_size_head

@@ -2,6 +2,7 @@
 //!
 //! Coverage:
 //!  - create pool mirror
+//!  - cancel pool mirror (#1097)
 //!  - settle mirror from source chain
 //!  - duplicate mirror creation rejected
 //!  - bridge timeout enforcement
@@ -132,6 +133,108 @@ fn test_duplicate_mirror_rejected() {
         &ChainId::Polygon,
         &bridge,
     );
+}
+
+#[test]
+fn test_cancel_pool_mirror() {
+    let ctx = CrossChainCtx::new();
+    let pool_id = ctx.create_pool(&ctx.admin);
+    let bridge = Address::generate(&ctx.env);
+
+    let unified_id = ctx.client.create_pool_mirror(
+        &ctx.admin,
+        &pool_id,
+        &ChainId::Stellar,
+        &ChainId::Ethereum,
+        &bridge,
+    );
+
+    ctx.client.cancel_pool_mirror(&ctx.admin, &pool_id);
+
+    // Both indexes are cleared, so the pool can be mirrored again and the
+    // retired unified id no longer resolves.
+    assert!(ctx.client.get_pool_mirror(&pool_id).is_none());
+    assert!(ctx.client.get_mirror_by_unified_id(&unified_id).is_none());
+}
+
+#[test]
+fn test_cancelled_mirror_frees_the_pool_for_a_new_mirror() {
+    let ctx = CrossChainCtx::new();
+    let pool_id = ctx.create_pool(&ctx.admin);
+    let bridge = Address::generate(&ctx.env);
+
+    ctx.client.create_pool_mirror(
+        &ctx.admin,
+        &pool_id,
+        &ChainId::Stellar,
+        &ChainId::Ethereum,
+        &bridge,
+    );
+    ctx.client.cancel_pool_mirror(&ctx.admin, &pool_id);
+
+    // Unified ids stay monotonic across a cancel, so the new mirror does not
+    // inherit the identifier the cancelled one was holding.
+    let new_unified_id = ctx.client.create_pool_mirror(
+        &ctx.admin,
+        &pool_id,
+        &ChainId::Stellar,
+        &ChainId::Polygon,
+        &bridge,
+    );
+    assert_eq!(new_unified_id, 2);
+    assert_eq!(
+        ctx.client.get_pool_mirror(&pool_id).unwrap().target_chain,
+        ChainId::Polygon
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #70)")]
+fn test_cancel_unknown_mirror_rejected() {
+    let ctx = CrossChainCtx::new();
+    let pool_id = ctx.create_pool(&ctx.admin);
+    ctx.client.cancel_pool_mirror(&ctx.admin, &pool_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #70)")]
+fn test_cancel_missing_mirror_after_first_cancel_rejected() {
+    let ctx = CrossChainCtx::new();
+    let pool_id = ctx.create_pool(&ctx.admin);
+    let bridge = Address::generate(&ctx.env);
+
+    ctx.client.create_pool_mirror(
+        &ctx.admin,
+        &pool_id,
+        &ChainId::Stellar,
+        &ChainId::Ethereum,
+        &bridge,
+    );
+    ctx.client.cancel_pool_mirror(&ctx.admin, &pool_id);
+    // Cancelling twice must not silently succeed on a record that is gone.
+    ctx.client.cancel_pool_mirror(&ctx.admin, &pool_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_cancel_settled_mirror_rejected() {
+    let ctx = CrossChainCtx::new();
+    let pool_id = ctx.create_pool(&ctx.admin);
+    let bridge = Address::generate(&ctx.env);
+
+    ctx.client.create_pool_mirror(
+        &ctx.admin,
+        &pool_id,
+        &ChainId::Stellar,
+        &ChainId::Ethereum,
+        &bridge,
+    );
+    ctx.client
+        .settle_mirror_from_source(&ctx.admin, &pool_id, &0);
+
+    // A settled mirror is final; cancelling it would rewrite the outcome the
+    // target chain has already paid out against.
+    ctx.client.cancel_pool_mirror(&ctx.admin, &pool_id);
 }
 
 #[test]

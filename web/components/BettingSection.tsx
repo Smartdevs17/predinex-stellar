@@ -60,7 +60,7 @@ export default function BettingSection({
   const walletBalance: number | null =
     isConnected && Number.isFinite(parsedWalletBalance) ? parsedWalletBalance : null;
 
-  const { isMismatch } = useNetworkMismatch();
+  const { isMismatch, expectedNetworkName } = useNetworkMismatch();
 
   // Inline, client-side validation of the bet amount. Returns a human-readable
   // error string, or null when the amount is valid for this pool. Runs on every
@@ -284,15 +284,13 @@ export default function BettingSection({
           </div>
         )}
 
-      {/* Network mismatch warning */}
-      {isMismatch && (
-        <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg flex gap-2">
-          <AlertCircle className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5" />
-          <p className="text-sm text-yellow-600">
-            {t('betting.networkMismatch').replace('{network}', expectedNetworkName)}
-          </p>
-        </div>
-      )}
+      {/* Network mismatch warning — the same component the navbar banner uses,
+          so the message and the switch action have one definition. The copy is
+          passed in so it stays localised. */}
+      <NetworkMismatchWarning
+        variant="inline"
+        message={t('betting.networkMismatch').replace('{network}', expectedNetworkName)}
+      />
 
       {/* Amount input */}
       <div>
